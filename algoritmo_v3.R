@@ -3,7 +3,7 @@
 ###############################################
 
 packages <- c("flexclust", "lpSolve", "mclust", "aricode", 
-              "cluster", "proxy", "ggplot2")
+              "cluster", "proxy", "ggplot2", "readr", "dplyr")
 installed <- rownames(installed.packages())
 to_install <- setdiff(packages, installed)
 if (length(to_install) > 0) install.packages(to_install)
@@ -11,20 +11,20 @@ if (length(to_install) > 0) install.packages(to_install)
 library(lpSolve)
 library(proxy)
 library(cluster)
-library(mclust)
-library(aricode)
 library(ggplot2)
+library(dplyr)
 
 ###############################################
 # UTILIDADES
 ###############################################
+
 prepare_data <- function(dataset) {
   dataset <- as.data.frame(dataset)
   X <- dataset
-  
   list(X = X)
 }
 
+set.seed(22)
 ###############################################
 # MILP
 ###############################################
@@ -36,13 +36,11 @@ solve_milp_assignment <- function(data, centroids, size_constraints) {
   cost_matrix <- proxy::dist(data, centroids, method = "cosine")
   cost_vec <- as.vector(t(as.matrix(cost_matrix)))
   
-  # Restricción 1: cada punto debe asignarse a un solo clúster
   constr1 <- matrix(0, n, n*k)
   for (i in 1:n) {
     constr1[i, ((i - 1) * k + 1):(i * k)] <- 1
   }
   
-  # Restricción 2: cada clúster debe tener tamaño EXACTO
   constr2 <- matrix(0, k, n*k)
   for (j in 1:k) {
     constr2[j, seq(j, n*k, by = k)] <- 1
@@ -65,7 +63,7 @@ solve_milp_assignment <- function(data, centroids, size_constraints) {
 }
 
 ###############################################
-# KM-MILP COMPLETO
+# KM-MILP
 ###############################################
 
 clustering_with_size_constraints <- function(data, size_constraints, max_iter = 100, tol = 1e-6) {
@@ -74,7 +72,6 @@ clustering_with_size_constraints <- function(data, size_constraints, max_iter = 
   d <- ncol(data)
   k <- length(size_constraints)
   
-  # Inicialización de centroides
   idx <- sample(1:n, k)
   centroids <- data[idx, , drop = FALSE]
   
@@ -85,7 +82,8 @@ clustering_with_size_constraints <- function(data, size_constraints, max_iter = 
     new_centroids <- matrix(0, nrow = k, ncol = d)
     for (j in 1:k) {
       pts <- data[p == j, , drop = FALSE]
-      new_centroids[j, ] <- colMeans(pts)
+      if (nrow(pts) > 0) new_centroids[j, ] <- colMeans(pts)
+      else new_centroids[j, ] <- centroids[j, ]
     }
     
     if (max(abs(centroids - new_centroids)) < tol) break
@@ -96,7 +94,7 @@ clustering_with_size_constraints <- function(data, size_constraints, max_iter = 
 }
 
 ###############################################
-# GENERAR RANGOS DE CARDINALIDAD CON DELTA
+# FUNCIONES DE CARDINALIDAD
 ###############################################
 
 compute_cardinality_ranges <- function(target, delta) {
@@ -111,11 +109,6 @@ compute_cardinality_ranges <- function(target, delta) {
   
   list(lower = lower, upper = upper)
 }
-
-###############################################
-# GENERAR TODAS LAS CARDINALIDADES POSIBLES
-# QUE SUMAN N Y RESPETAN LOS RANGOS
-###############################################
 
 generate_cardinalities <- function(lower, upper, total_n) {
   k <- length(lower)
@@ -147,39 +140,89 @@ generate_cardinalities <- function(lower, upper, total_n) {
 }
 
 ###############################################
-# EVALUAR UNA CONFIGURACIÓN DE CARDINALIDAD
+# EVALUACIÓN (SILUETA + CSVI)
 ###############################################
 
 evaluate_cardinality_solution <- function(X, y, size_constraints, target_cardinality) {
   resultat <- clustering_with_size_constraints(X, size_constraints)
   labels <- resultat$p
   
-  # Silueta
   dist_mat <- proxy::dist(X, method = "cosine")
   sil <- silhouette(labels, dist_mat)
   sil_mean <- mean(sil[, 3])
   
-  # Cardinalidad real
   card_real <- as.numeric(table(factor(labels, levels = 1:length(size_constraints))))
   
-  # Violación
-  violation <- sum(abs(card_real - target_cardinality))
+  ilvc <- sum(abs(card_real - target_cardinality))
+  clvc <- sum(card_real != target_cardinality)
+  
+  n_total <- sum(card_real)
+  k_total <- length(card_real)
+  
+  alpha <- 0.5
+  norm_ilvc <- ilvc / n_total
+  norm_clvc <- clvc / k_total
+  csvi <- alpha * norm_ilvc + (1 - alpha) * norm_clvc
   
   list(
     silhouette = sil_mean,
-    size_violation = violation,
-    card_real = card_real
+    ilvc = ilvc,
+    clvc = clvc,
+    csvi = csvi
   )
 }
 
 ###############################################
-# EXPLORACIÓN DEL ESPACIO CON DELTA
+# MULTIOBJETIVO: PARETO + MO-SCORE (A MAXIMIZAR)
+###############################################
+
+pareto_dominates <- function(a, b) {
+  (a$silhouette >= b$silhouette && a$CSVI <= b$CSVI) &&
+    (a$silhouette >  b$silhouette || a$CSVI   < b$CSVI)
+}
+
+find_pareto_front <- function(df) {
+  n <- nrow(df)
+  dominated <- rep(FALSE, n)
+  
+  for (i in 1:n) {
+    for (j in 1:n) {
+      if (i != j) {
+        if (pareto_dominates(df[j,], df[i,])) {
+          dominated[i] <- TRUE
+          break
+        }
+      }
+    }
+  }
+  
+  df[!dominated, ]
+}
+
+multiobjective_score <- function(sil, csvi, 
+                                 w_sil, 
+                                 w_csvi,
+                                 sil_range = c(-1, 1)) {
+  sil_min <- sil_range[1]
+  sil_max <- sil_range[2]
+  sil_norm <- (sil - sil_min) / (sil_max - sil_min)
+  sil_norm <- max(min(sil_norm, 1), 0)  
+  
+  # Normalizar CSVI
+  csvi_norm <- max(min(csvi, 1), 0)
+  
+  score <- w_sil * sil_norm + w_csvi * (1 - csvi_norm)
+  return(score)
+}
+
+###############################################
+# EXPLORACIÓN COMPLETA DEL ESPACIO
 ###############################################
 
 run_flexible_cardinality_search <- function(dataset, target_cardinality, delta, dataset_name = "dataset") {
+  
   data_prep <- prepare_data(dataset)
   X <- data_prep$X
-  y <- data_prep$y
   
   n <- nrow(X)
   k <- length(target_cardinality)
@@ -189,117 +232,103 @@ run_flexible_cardinality_search <- function(dataset, target_cardinality, delta, 
   upper <- ranges$upper
   
   card_list <- generate_cardinalities(lower, upper, n)
-  cat("Número de configuraciones:", length(card_list), "\n")
+  cat("Número de configuraciones posibles:", length(card_list), "\n")
   
-  results <- vector("list", length(card_list))
+  results <- list()
   
   for (i in seq_along(card_list)) {
-    cat("Evaluando config", i, "de", length(card_list), "\n")
+    if (i %% 10 == 0 || i == 1) cat("Evaluando config", i, "de", length(card_list), "\n")
     
-    eval <- evaluate_cardinality_solution(X, y, card_list[[i]], target_cardinality)
+    eval <- evaluate_cardinality_solution(X, NULL, card_list[[i]], target_cardinality)
     
     results[[i]] <- data.frame(
       dataset = dataset_name,
       config_id = i,
       silhouette = eval$silhouette,
-      size_violation = eval$size_violation,
-      cardinality = paste(card_list[[i]], collapse = "-"),
-      stringsAsFactors = FALSE
+      ILVC = eval$ilvc,
+      CLVC = eval$clvc,
+      CSVI = eval$csvi,
+      cardinality = paste(card_list[[i]], collapse = "-")
     )
   }
   
-  results_df <- do.call(rbind, results)
-  results_df
-}
-
-###############################################
-# FRENTE DE PARETO
-###############################################
-
-compute_pareto_front <- function(df) {
-  n <- nrow(df)
-  is_pareto <- rep(TRUE, n)
+  df <- bind_rows(results)
   
-  for (i in 1:n) {
-    for (j in 1:n) {
-      if (i == j) next
-      
-      if (df$silhouette[j] >= df$silhouette[i] &&
-          df$size_violation[j] <= df$size_violation[i] &&
-          (df$silhouette[j] > df$silhouette[i] ||
-           df$size_violation[j] < df$size_violation[i])) {
-        is_pareto[i] <- FALSE
-        break
-      }
-    }
-  }
+  # MO_Score a maximizar 
+  df$MO_Score <- mapply(
+    multiobjective_score,
+    sil  = df$silhouette,
+    csvi = df$CSVI,
+    MoreArgs = list(
+      w_sil = 0.9,
+      w_csvi = 0.1,
+      sil_range = c(-1, 1) 
+    )
+  )
   
-  df$is_pareto <- is_pareto
   df
 }
 
 ###############################################
-# GRÁFICA DE PARETO
+# GRÁFICA PARETO CON PARETO FRONT
 ###############################################
 
-plot_pareto <- function(df) {
-  df <- compute_pareto_front(df)
-  pareto <- df[df$is_pareto, ]
-  pareto <- pareto[order(pareto$size_violation), ]
+plot_pareto <- function(df) { 
+  df$Solution_ID <- factor(1:nrow(df))
   
-  ggplot(df, aes(x = size_violation, y = silhouette)) +
-    geom_point(alpha = 0.6) +
-    geom_point(data = pareto, color = "red", size = 3) +
-    geom_line(data = pareto, aes(x = size_violation, y = silhouette), color = "red") +
-    xlab("Violación de tamaño") +
-    ylab("Coeficiente de silueta") +
-    ggtitle("Frente de Pareto: violación vs. silueta") +
+  max_sil <- max(df$silhouette)
+  max_csvi <- max(df$CSVI)
+  scale_factor <- max_sil / max_csvi
+  
+  ggplot(df, aes(x = Solution_ID)) +
+    geom_col(
+      aes(y = silhouette),
+      fill = "#5B9BD5", color = "#1F4E79", alpha = 0.75
+    ) +
+    geom_line(
+      aes(y = CSVI * scale_factor, group = 1),
+      color = "#ED7D31", size = 1
+    ) +
+    geom_point(
+      aes(y = CSVI * scale_factor),
+      color = "#ED7D31", size = 2
+    ) +
+    scale_y_continuous(
+      name = "Silueta",
+      sec.axis = sec_axis(~ . / scale_factor, name = "Violación CSVI")
+    ) +
+    labs(
+      title = "Gráfica de Pareto",
+      x = "Soluciones",
+      subtitle = "Barras = Silueta, Línea = CSVI"
+    ) +
     theme_minimal()
 }
 
 ###############################################
-# EJEMPLO COMPLETO
+# EJEMPLO DE USO
 ###############################################
 
-#data(iris)
-#iris$class <- iris$Species
-#iris$Species <- NULL
-library(readr)
-wine <- read_csv("C:/Users/emont/OneDrive/Escritorio/Tesis/wine/wine.data", 
+
+wine <- read_csv("tesis/wine.data",
                  col_names = FALSE)
-wine=wine[,-1]
+wine <- wine[,-1]
 target_cardinality <- c(59, 71, 48)
 delta <- c(0.05, 0.05, 0.05)
 
 res <- run_flexible_cardinality_search(wine, target_cardinality, delta, dataset_name = "wine")
 
-###############################################
-# IMPRIMIR CARDINALIDAD ORIGINAL Y LÍMITES
-###############################################
+pareto_front <- find_pareto_front(res)
+best_solution <- pareto_front[which.max(pareto_front$MO_Score), ]
 
-# Calcular límites con delta
-ranges <- compute_cardinality_ranges(target_cardinality, delta)
-lower <- ranges$lower
-upper <- ranges$upper
+cat("\n==============================\n")
+cat(" FRENTE PARETO\n")
+cat("==============================\n")
+print(pareto_front)
 
-cat("\n========================================\n")
-cat(" CARDINALIDAD ORIGINAL Y LÍMITES DELTA\n")
-cat("========================================\n")
+cat("\n==============================\n")
+cat(" MEJOR SOLUCIÓN MULTIOBJETIVO (MO_Score MÁXIMO)\n")
+cat("==============================\n")
+print(best_solution)
 
-cat("Cardinalidad original:      ", paste(target_cardinality, collapse = " - "), "\n")
-cat("Límites inferiores (delta): ", paste(lower, collapse = " - "), "\n")
-cat("Límites superiores (delta): ", paste(upper, collapse = " - "), "\n")
-
-###############################################
-# IMPRIMIR LAS 3 MEJORES SOLUCIONES POR SILUETA
-###############################################
-
-cat("\n========================================\n")
-cat(" TOP 5 MEJORES SOLUCIONES (por silueta)\n")
-cat("========================================\n")
-
-best5 <- res[order(-res$silhouette), ]
-print(best5)
-
-# Graficar Pareto
 print(plot_pareto(res))
