@@ -219,7 +219,12 @@ multiobjective_score <- function(sil, csvi,
 # EXPLORACIÓN COMPLETA DEL ESPACIO
 ###############################################
 
-run_flexible_cardinality_search <- function(dataset, target_cardinality, delta, dataset_name = "dataset") {
+run_flexible_cardinality_search <- function(dataset, 
+                                            target_cardinality, 
+                                            delta, 
+                                            dataset_name = "dataset",
+                                            w_sil = 0.5,
+                                            w_csvi = 0.5) {
   
   data_prep <- prepare_data(dataset)
   X <- data_prep$X
@@ -260,8 +265,8 @@ run_flexible_cardinality_search <- function(dataset, target_cardinality, delta, 
     sil  = df$silhouette,
     csvi = df$CSVI,
     MoreArgs = list(
-      w_sil = 0.9,
-      w_csvi = 0.1,
+      w_sil = w_sil,
+      w_csvi = w_csvi,
       sil_range = c(-1, 1) 
     )
   )
@@ -310,13 +315,21 @@ plot_pareto <- function(df) {
 ###############################################
 
 
-wine <- read_csv("tesis/wine.data",
-                 col_names = FALSE)
-wine <- wine[,-1]
-target_cardinality <- c(59, 71, 48)
+#wine <- read_csv("tesis/wine.data",
+              #   col_names = FALSE)
+data(iris)
+iris <- iris[,-5]
+target_cardinality <- c(50, 50, 50)
 delta <- c(0.05, 0.05, 0.05)
+w_sil= 0.9
+w_csvi = 0.1
 
-res <- run_flexible_cardinality_search(wine, target_cardinality, delta, dataset_name = "wine")
+res <- run_flexible_cardinality_search(iris, 
+                                       target_cardinality, 
+                                       delta, 
+                                       dataset_name = "iris",
+                                       w_sil, 
+                                       w_csvi)
 
 pareto_front <- find_pareto_front(res)
 best_solution <- pareto_front[which.max(pareto_front$MO_Score), ]
