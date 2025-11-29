@@ -320,9 +320,9 @@ plot_pareto <- function(df) {
 data(iris)
 iris <- iris[,-5]
 target_cardinality <- c(50, 50, 50)
-delta <- c(0.05, 0.05, 0.05)
-w_sil= 0.9
-w_csvi = 0.1
+delta <- c(0.05, 0.05, 0.05) #tolerancia de la restrigción
+w_sil <- 0.9 #peso del coeficiente de silueta
+w_csvi <- 0.1 #peso de la violación de tamaño (CSVI)
 
 res <- run_flexible_cardinality_search(iris, 
                                        target_cardinality, 
