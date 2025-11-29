@@ -345,3 +345,12 @@ cat("==============================\n")
 print(best_solution)
 
 print(plot_pareto(res))
+
+best_cardinality <- strsplit(best_solution$cardinality, "-")[[1]] |> 
+  as.numeric()
+
+best_clustering <- clustering_with_size_constraints(iris, best_cardinality)
+best_assignments <- best_clustering$p
+final_result <- cbind(iris, cluster = best_assignments)
+
+write.csv(final_result, "best_clustering_assignments.csv", row.names = FALSE)
